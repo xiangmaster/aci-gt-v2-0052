@@ -1,0 +1,104 @@
+name: PR Triage (Models)
+on:
+  pull_request_target:
+    types:
+    - opened
+permissions:
+  pull-requests: write
+  issues: write
+  models: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  triage:
+    if: ${{ github.repository == 'xiangmaster/aci-gt-v2-0052' && 
+      github.event.pull_request.user.type != 'Bot' }}
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check existing labels
+      uses: actions/github-script@v9
+      id: check-labels
+      with:
+        script: "const skipLabels = new Set(['automation']);\nconst typeLabels = new
+          Set(['bugfix', 'hardware-support', 'enhancement', 'dependencies', 'submodules',
+          'github_actions', 'trunk', 'cleanup']);\nconst prLabels = context.payload.pull_request.labels.map(l
+          => l.name);\n\nconst shouldSkipAll = prLabels.some(l => skipLabels.has(l));\n\
+          const hasTypeLabel = prLabels.some(l => typeLabels.has(l));\n\ncore.setOutput('skip_all',
+          shouldSkipAll ? 'true' : 'false');\ncore.setOutput('has_type_label', hasTypeLabel
+          ? 'true' : 'false');\n"
+    - name: Detect spam or low-quality content
+      if: steps.check-labels.outputs.skip_all != 'true'
+      uses: actions/ai-inference@v2
+      id: quality
+      continue-on-error: true
+      with:
+        max-tokens: 20
+        prompt: "Is this GitHub pull request spam, AI-generated slop, or low quality?\n\
+          \nTitle: ${{ github.event.pull_request.title }}\nBody: ${{ github.event.pull_request.body
+          }}\n\nRespond with exactly one of: spam, ai-generated, needs-review, ok\n"
+        system-prompt: You detect spam and low-quality contributions. Be 
+          conservative - only flag obvious spam or AI slop.
+        model: openai/gpt-4o-mini
+    - name: Apply quality label if needed
+      if: steps.check-labels.outputs.skip_all != 'true' && 
+        steps.quality.outputs.response != '' && steps.quality.outputs.response 
+        != 'ok'
+      uses: actions/github-script@v9
+      id: quality-label
+      env:
+        QUALITY_LABEL: ${{ steps.quality.outputs.response }}
+      with:
+        script: "const label = (process.env.QUALITY_LABEL || '').trim().toLowerCase();\n\
+          const labelMeta = {\n  'spam': { color: 'd73a4a', description: 'Possible
+          spam' },\n  'ai-generated': { color: 'fbca04', description: 'Possible AI-generated
+          low-quality content' },\n  'needs-review': { color: 'f9d0c4', description:
+          'Needs human review' },\n};\nconst meta = labelMeta[label];\nif (!meta)
+          return;\n\n// Ensure label exists\ntry {\n  await github.rest.issues.getLabel({
+          owner: context.repo.owner, repo: context.repo.repo, name: label });\n} catch
+          (e) {\n  if (e.status !== 404) throw e;\n  await github.rest.issues.createLabel({
+          owner: context.repo.owner, repo: context.repo.repo, name: label, color:
+          meta.color, description: meta.description });\n}\n\n// Apply label\nawait
+          github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo,
+          issue_number: context.payload.pull_request.number, labels: [label] });\n\
+          \ncore.setOutput('is_spam', 'true');\n"
+    - name: Classify PR for labeling
+      if: steps.check-labels.outputs.skip_all != 'true' && 
+        steps.check-labels.outputs.has_type_label != 'true' && 
+        steps.quality.outputs.response != 'spam' && 
+        steps.quality.outputs.response != 'ai-generated'
+      uses: actions/ai-inference@v2
+      id: classify
+      continue-on-error: true
+      with:
+        max-tokens: 30
+        prompt: "Classify this pull request into exactly one category.\n\nReturn exactly
+          one of: bugfix, hardware-support, enhancement\n\nUse bugfix if it fixes
+          a bug, crash, or incorrect behavior.\nUse hardware-support if it adds or
+          improves support for a specific hardware device/variant.\nUse enhancement
+          if it adds a new feature, improves performance, or refactors code.\n\nTitle:
+          ${{ github.event.pull_request.title }}\nBody: ${{ github.event.pull_request.body
+          }}\n"
+        system-prompt: You classify pull requests into categories. Be 
+          conservative and pick the most appropriate single label.
+        model: openai/gpt-4o-mini
+    - name: Apply type label
+      if: steps.check-labels.outputs.skip_all != 'true' && 
+        steps.check-labels.outputs.has_type_label != 'true' && 
+        steps.classify.outputs.response != ''
+      uses: actions/github-script@v9
+      env:
+        TYPE_LABEL: ${{ steps.classify.outputs.response }}
+      with:
+        script: "const label = (process.env.TYPE_LABEL || '').trim().toLowerCase();\n\
+          const labelMeta = {\n  'bugfix': { color: 'd73a4a', description: 'Bug fix'
+          },\n  'hardware-support': { color: '0e8a16', description: 'Hardware support
+          addition or improvement' },\n  'enhancement': { color: 'a2eeef', description:
+          'New feature or enhancement' },\n};\nconst meta = labelMeta[label];\nif
+          (!meta) return;\n\n// Ensure label exists\ntry {\n  await github.rest.issues.getLabel({
+          owner: context.repo.owner, repo: context.repo.repo, name: label });\n} catch
+          (e) {\n  if (e.status !== 404) throw e;\n  await github.rest.issues.createLabel({
+          owner: context.repo.owner, repo: context.repo.repo, name: label, color:
+          meta.color, description: meta.description });\n}\n\n// Apply label\nawait
+          github.rest.issues.addLabels({ owner: context.repo.owner, repo: context.repo.repo,
+          issue_number: context.payload.pull_request.number, labels: [label] });\n"
